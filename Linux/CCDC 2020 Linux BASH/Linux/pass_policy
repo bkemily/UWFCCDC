@@ -1,0 +1,28 @@
+#!/bin/bash
+#Run as root
+
+if [[ $EUID -ne 0 ]]; then
+        echo "This script must be run as root" 1>&2
+        exit 1
+fi
+
+install_cracklib()
+{
+    echo "libpam-cracklib not installed... Installing."
+    sleep 3
+    apt-get update
+    apt-get install libpam-cracklib
+}
+
+echo "Checking for libpam-cracklib..."
+dpkg -l | grep -qw libpam-cracklib || install_cracklib       #Install libpam-cracklib if not installed.
+
+mv /etc/pam.d/common-auth /etc/pam.d/common-auth.bak 
+mv /etc/pam.d/common-password /etc/pam.d/common-password.bak 
+mv /etc/login.defs /etc/login.defs.bak
+
+cp common-auth /etc/pam.d/common-auth
+cp common-password /etc/pam.d/common-password
+cp login.defs /etc/login.defs
+
+

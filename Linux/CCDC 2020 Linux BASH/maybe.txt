@@ -1,0 +1,6 @@
+cp auth /etc/pam.d/common-auth
+cp pass /etc/pam.d/common-password
+cp logon /etc/login.defs
+cat "allow-guest=false" >> /etc/lightdm/lightdm.conf
+cat "auth required pam_tally2.so deny=5 onerr=fail unlock_time=1800" >> /etc/pam.d/common-auth
+dpkg-reconfigure --priority=low unattended-upgrades

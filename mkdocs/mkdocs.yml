@@ -1,0 +1,26 @@
+site_name: 'UWF CCDC'  # Customize your site name
+repo_url: https://github.com/bkemily/UWFCCDC.git 
+docs_dir: root/
+exclude_docs: |
+  mkdocs/root
+plugins:
+  - git-committers:
+      repository: bkemily/UWFCCDC
+      branch: main
+      docs_path: ./
+  - git-revision-date-localized:
+      enable_creation_date: true
+markdown_extensions:
+  - admonition  # For note blocks like warnings, tips, etc.
+  - codehilite  # Syntax highlighting for code blocks
+  - pymdownx.details
+  - pymdownx.superfences
+  - attr_list
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+use_directory_urls: true
+#extra:
+  # navigation_depth: 1  # Prevent headers from being used as links
+theme:
+  name: material  # You can replace with another theme if preferred
