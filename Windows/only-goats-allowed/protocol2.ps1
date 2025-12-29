@@ -6,6 +6,7 @@ $allowedUsersFile = "allowed.txt"
 $OutputFile = "scriptOut.txt"
 
 # Accounts that should NEVER be touched (Regex patterns)
+# 'krbtgt' is the Key Distribution Center Service Account - do not touch.
 $ExcludePatterns = @('krbtgt', 'Guest', 'DefaultAccount', 'svc_', 'gmsa$') 
 
 # --- Setup & Checks ---
@@ -21,7 +22,6 @@ $allowedUsers = Get-Content $allowedUsersFile
 # Function: Restrict access to Domain Admins only
 function Secure-OutputFile {
     param($path)
-    # Remove inheritance and grant Full control to Domain Admins only
     try {
         $acl = Get-Acl $path
         $acl.SetAccessRuleProtection($true, $false) # Disable inheritance
@@ -44,19 +44,19 @@ function New-RandomPassword {
     $all = ($lower + $upper + $digits + $symbols).ToCharArray()
     $pwChars = @()
     
-    # Ensure at least one of each class
+    # Ensure at least one of each class is present
     $pwChars += ($lower.ToCharArray() | Get-Random -Count 1)
     $pwChars += ($upper.ToCharArray() | Get-Random -Count 1)
     $pwChars += ($digits.ToCharArray() | Get-Random -Count 1)
     $pwChars += ($symbols.ToCharArray() | Get-Random -Count 1)
     
-    # Fill the rest
+    # Fill the remaining length
     $remaining = $Length - $pwChars.Count
     for ($i = 0; $i -lt $remaining; $i++) {
         $pwChars += $all | Get-Random -Count 1
     }
     
-    # Shuffle
+    # Shuffle the result
     return -join ($pwChars | Get-Random -Count $pwChars.Count)
 }
 
@@ -69,11 +69,11 @@ function New-RandomPassword {
 
 $allUsers = Get-ADUser -Filter * -Properties MemberOf, Enabled, SamAccountName
 
-# List to track who survives Phase 1
+# List to track who is allowed and needs processing in Phase 2 & 3
 $activeUsers = @()
 
-# === Phase 1: Wrong Users (Disable) ===
-"`nPhase 1: Wrong Users" | Out-File -FilePath $OutputFile -Append
+# === Phase 1: Wrong Users ===
+"`nPhase 1: Wrong Users (Disabled)" | Out-File -FilePath $OutputFile -Append
 "-----------------------" | Out-File -FilePath $OutputFile -Append
 $formatString = "{0,-20} {1,-10}"
 $formatString -f "Username", "Action" | Out-File -FilePath $OutputFile -Append
@@ -87,15 +87,14 @@ foreach ($user in $allUsers) {
     foreach ($pat in $ExcludePatterns) { if ($sam -match $pat) { $isExcluded = $true; break } }
     
     if ($isExcluded) {
-        # Skip excluded accounts entirely
-        continue
+        continue # Skip system accounts entirely
     }
 
     if ($allowedUsers -contains $sam) {
-        # User is allowed, keep them for next phases
+        # User is allowed: Add to active list for later processing
         $activeUsers += $user
     } else {
-        # User is NOT allowed -> Disable
+        # User is NOT allowed: Disable
         try {
             Disable-ADAccount -Identity $user.DistinguishedName -ErrorAction Stop
             $formatString -f $sam, "Disabled" | Out-File -FilePath $OutputFile -Append
@@ -108,15 +107,15 @@ foreach ($user in $allUsers) {
 }
 
 # === Phase 2: User Admin Status ===
+# Checks only the Allowed Users from Phase 1
 "`nPhase 2: User Admin Status" | Out-File -FilePath $OutputFile -Append
 "-----------------------" | Out-File -FilePath $OutputFile -Append
 $formatString -f "Username", "IsAdmin" | Out-File -FilePath $OutputFile -Append
 $formatString -f "--------", "-------" | Out-File -FilePath $OutputFile -Append
 
 foreach ($user in $activeUsers) {
-    # Check recursive membership in Domain Admins
-    # Note: This is a basic check. For comprehensive checks, one might check "Administrators" group too.
     $isAdmin = "No"
+    # Check "Domain Admins" and standard "Administrators"
     $groups = Get-ADPrincipalGroupMembership -Identity $user.DistinguishedName -ErrorAction SilentlyContinue
     if ($groups.Name -contains "Domain Admins" -or $groups.Name -contains "Administrators") {
         $isAdmin = "Yes"
@@ -126,6 +125,7 @@ foreach ($user in $activeUsers) {
 }
 
 # === Phase 3: User Passwords ===
+# Rotates passwords for all Allowed Users
 "`nPhase 3: User Passwords" | Out-File -FilePath $OutputFile -Append
 "-----------------------" | Out-File -FilePath $OutputFile -Append
 $passFormat = "{0,-20} {1,-25}"
@@ -137,13 +137,16 @@ foreach ($user in $activeUsers) {
         $plain = New-RandomPassword -Length 15
         $secure = ConvertTo-SecureString $plain -AsPlainText -Force
         
-        # Reset Password
+        # 1. Reset Password
         Set-ADAccountPassword -Identity $user.DistinguishedName -NewPassword $secure -Reset -ErrorAction Stop
         
-        # Enable account if it was somehow disabled but allowed
-        if ($user.Enabled -eq $false) { Enable-ADAccount -Identity $user.DistinguishedName }
+        # 2. Unlock Account (if locked)
+        Unlock-ADAccount -Identity $user.DistinguishedName -ErrorAction SilentlyContinue
         
-        # Log
+        # 3. Force change at next logon (Security best practice)
+        Set-ADUser -Identity $user.DistinguishedName -ChangePasswordAtLogon $true -ErrorAction Stop
+        
+        # Log credentials
         $passFormat -f $user.SamAccountName, $plain | Out-File -FilePath $OutputFile -Append
         Write-Host "ROTATED: $($user.SamAccountName)" -ForegroundColor Green
     } catch {
@@ -152,6 +155,6 @@ foreach ($user in $activeUsers) {
     }
 }
 
-# Secure the file
+# Secure the output file
 Secure-OutputFile -path $OutputFile
 Write-Host "`nDONE. Results saved to $OutputFile" -ForegroundColor Cyan
