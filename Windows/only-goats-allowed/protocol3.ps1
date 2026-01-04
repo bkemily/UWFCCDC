@@ -1,5 +1,8 @@
-# Run as Domain Admin on a Domain Controller or machine with RSAT tools
-Import-Module ActiveDirectory -ErrorAction Stop
+# Check for Admin Privileges
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "[-] Script must be run as Administrator."
+    break
+}
 
 # --- Configuration ---
 $allowedUsersFile = "allowed.txt"
