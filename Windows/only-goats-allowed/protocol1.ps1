@@ -78,6 +78,7 @@ if ($adModule) {
     Write-Step "Active Directory Module NOT FOUND. Attempting Installation..."
     try {
         Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0 -ErrorAction Stop
+        Install-WindowsFeature RSAT-AD-PowerShell
         Write-Host "  [+] RSAT Installed Successfully." -ForegroundColor Green
     } catch {
         Write-Host "  [!] FAILED to install RSAT via PowerShell. If this is a DC, it should be there." -ForegroundColor Red
