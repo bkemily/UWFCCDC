@@ -4,7 +4,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     break
 }
 
-# --- Helper Function for Output ---
+# --- Helper Functions ---
 function Write-Section {
     param([string]$Title)
     Write-Host "`n========================================================" -ForegroundColor Cyan
@@ -17,17 +17,8 @@ function Write-Step {
     Write-Host "  > $Message" -ForegroundColor Green
 }
 
-function Write-ErrorStep {
-    param([string]$Message)
-    Write-Host "  [!] ERROR: $Message" -ForegroundColor Red
-}
-
-# Import AD Module
-try {
-    Import-Module ActiveDirectory -ErrorAction Stop
-} catch {
-    Write-Warning "Active Directory module not found. Some domain-specific commands may fail."
-}
+# Import AD Module if available
+try { Import-Module ActiveDirectory -ErrorAction SilentlyContinue } catch {}
 
 # ========================================================
 # PHASE 1: ACCOUNT & PASSWORD POLICIES
@@ -35,8 +26,7 @@ try {
 Write-Section "PHASE 1: Enforcing Domain Password & Lockout Policies"
 
 try {
-    Write-Step "Setting Domain Password Policy (Min Length: 14, History: 24, Age: 1 Day)"
-    [cite_start]
+    Write-Step "Setting Domain Password Policy (Min: 14, History: 24, Age: 1 Day)"
     Set-ADDefaultDomainPasswordPolicy -Identity (Get-ADDomain).Name `
         -MinPasswordLength 14 `
         -PasswordHistoryCount 24 `
@@ -46,117 +36,118 @@ try {
         -ReversibleEncryptionEnabled $false -ErrorAction Stop
 
     Write-Step "Setting Account Lockout Policy (Threshold: 5, Duration: 15m)"
-    [cite_start]
     Set-ADDefaultDomainPasswordPolicy -Identity (Get-ADDomain).Name `
         -LockoutDuration "00:15:00" `
         -LockoutObservationWindow "00:30:00" `
         -LockoutThreshold 5 -ErrorAction Stop
 } catch {
-    Write-ErrorStep "Failed to apply AD Password Policy. (Are you on the DC?)"
+    Write-Warning "  [!] Could not set AD policies (Are you on the DC?). Skipping..."
 }
 
 # ========================================================
-# PHASE 2: REGISTRY HARDENING (AD SPECIFIC)
+# PHASE 2: REGISTRY HARDENING (Security Options)
 # ========================================================
-Write-Section "PHASE 2: Registry Hardening (SMB, LDAP, LSASS)"
+Write-Section "PHASE 2: Registry Hardening"
 
-# 1. Disable LM Hash Storage 
-Write-Step "Disabling LAN Manager (LM) Hash storage"
+# 1. Disable LM Hash & Force SMB Signing
+Write-Step "Disabling LM Hash & Enforcing SMB Signing"
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "NoLMHash" -Value 1 -Force
-
-# 2. Enforce SMB Signing 
-Write-Step "Enforcing SMB Signing (Digitally sign communications)"
 Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\LanmanServer\Parameters" -Name "RequireSecuritySignature" -Value 1 -Force
 Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\LanmanServer\Parameters" -Name "EnableSecuritySignature" -Value 1 -Force
 
-# 3. LDAP Signing Requirements 
-Write-Step "Enforcing LDAP Server Signing"
-New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters" -Name "LDAPServerIntegrity" -Value 2 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
-
-# 4. Disable SMBv1 (EternalBlue Mitigation)
-Write-Step "Disabling SMBv1 Protocol (EternalBlue Mitigation)"
+# 2. Disable SMBv1 (EternalBlue)
+Write-Step "Disabling SMBv1"
 Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction SilentlyContinue
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "SMB1" -Value 0 -Type DWORD -Force
 
-# 5. LSASS Protection (RunAsPPL) 
-Write-Step "Enabling LSASS Protection (RunAsPPL) to block Mimikatz"
+# 3. LSASS Protection 
+Write-Step "Enabling LSASS PPL (Mimikatz Protection)"
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RunAsPPL" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
 
-# 6. Disable NetBIOS over TCP/IP 
+# 4. Clear Pagefile at Shutdown 
+Write-Step "Enabling 'Clear Virtual Memory Pagefile on Shutdown'"
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 1 -Type DWORD -Force
+
+# 5. Prevent Automatic Login 
+Write-Step "Disabling AutoAdminLogon"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -Value "0" -Force
+
+# ========================================================
+# PHASE 3: NETWORK & FIREWALL SECURITY
+# ========================================================
+Write-Section "PHASE 3: Network & Firewall Security"
+
+# 1. Enable Windows Firewall Profiles
+Write-Step "Enabling all Windows Firewall Profiles (Domain, Public, Private)"
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
+
+# 2. RDP Network Level Authentication (NLA) 
+Write-Step "Enforcing Network Level Authentication (NLA) for RDP"
+(Get-WmiObject -Class "Win32_TSGeneralSetting" -Namespace root\cimv2\terminalservices -Filter "TerminalName='RDP-tcp'").SetUserAuthenticationRequired(1) | Out-Null
+
+# 3. Disable NetBIOS over TCP/IP
 Write-Step "Disabling NetBIOS over TCP/IP"
-Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" | ForEach-Object {
-    $_.SetTcpipNetbios(2) | Out-Null
-}
+Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" | ForEach-Object { $_.SetTcpipNetbios(2) | Out-Null }
+
+# 4. Disable File & Printer Sharing (Network Adapter Level) 
+Write-Step "Disabling File & Printer Sharing Binding on Adapters"
+Get-NetAdapterBinding | Where-Object { $_.ComponentID -eq "ms_server" } | Disable-NetAdapterBinding -Confirm:$false
 
 # ========================================================
-# PHASE 3: SERVICE MANAGEMENT 
+# PHASE 4: SERVICE MANAGEMENT
 # ========================================================
-Write-Section "PHASE 3: Disabling Vulnerable/Unnecessary Services"
+Write-Section "PHASE 4: Disabling Risky Services"
 
-$servicesToDisable = @(
-    [cite_start]"RemoteRegistry",      
-    [cite_start]"Spooler",             # Print Spooler (PrintNightmare) 
-    [cite_start]"TlntSvr",             # Telnet 
-    [cite_start]"MSFtpsvc",            # FTP 
-    [cite_start]"SNMP",                # SNMP 
-    [cite_start]"bthserv",             # Bluetooth Support 
-    "MapsBroker",          # Downloaded Maps Manager
-    [cite_start]"upnphost",            # UPnP Device Host 
-    [cite_start]"SSDPSRV",             # SSDP Discovery 
-    "Mcx2Svc"              # Media Center Extender
-)
-
-foreach ($service in $servicesToDisable) {
-    if (Get-Service -Name $service -ErrorAction SilentlyContinue) {
-        Write-Step "Disabling Service: $service"
-        Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
-        Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+$services = @("RemoteRegistry", "Spooler", "TlntSvr", "MSFtpsvc", "SNMP", "bthserv", "MapsBroker", "upnphost", "SSDPSRV", "Mcx2Svc")
+foreach ($srv in $services) {
+    if (Get-Service -Name $srv -ErrorAction SilentlyContinue) {
+        Write-Step "Disabling: $srv"
+        Stop-Service -Name $srv -Force -ErrorAction SilentlyContinue
+        Set-Service -Name $srv -StartupType Disabled -ErrorAction SilentlyContinue
     }
 }
 
 # ========================================================
-# PHASE 4: ADVANCED AUDITING & LOGGING
+# PHASE 5: ADVANCED AUDITING & LOGGING
 # ========================================================
-Write-Section "PHASE 4: Configuring Advanced Audit Policies"
+Write-Section "PHASE 5: Logging & Auditing"
 
-# Enabling specific audit categories mentioned in the checklist
-$auditCategories = @(
-    "Logon/Logoff", "Account Logon", "Account Management", "DS Access", 
-    "Object Access", "Policy Change", "Privilege Use", "System", "Detailed Tracking"
+# 1. Basic Audit Policies 
+Write-Step "Enabling Success/Failure Auditing"
+$cats = @("Account Logon","Account Management","Logon/Logoff","Policy Change","Privilege Use","System","Detailed Tracking")
+foreach ($c in $cats) { auditpol /set /category:"$c" /success:enable /failure:enable | Out-Null }
+
+# 2. Command Line Process Auditing 
+Write-Step "Enabling Command Line Process Auditing (Event 4688)"
+$auditPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
+if (!(Test-Path $auditPath)) { New-Item -Path $auditPath -Force | Out-Null }
+Set-ItemProperty -Path $auditPath -Name "ProcessCreationIncludeCmdLine_Enabled" -Value 1 -Type DWORD -Force
+
+Write-Step "Setting LDAP Interface Events to Level 5"
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics" -Name "16 LDAP Interface Events" -Value 5 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+
+Write-Step "Enabling Granular Operational Logs (DNS, BITS, WinUpdate)"
+$logs = @(
+    "Microsoft-Windows-DNS-Client/Operational",
+    "Microsoft-Windows-Bits-Client/Operational",
+    "Microsoft-Windows-WindowsUpdateClient/Operational"
 )
+foreach ($l in $logs) {
+    wevtutil sl $l /e:true -ErrorAction SilentlyContinue
+}
 
-# Note: 'auditpol' requires standard category names.
-Write-Step "Enabling Success/Failure Auditing for critical subsystems"
-auditpol /set /category:"Account Logon" /success:enable /failure:enable | Out-Null
-auditpol /set /category:"Account Management" /success:enable /failure:enable | Out-Null
-auditpol /set /category:"Logon/Logoff" /success:enable /failure:enable | Out-Null
-auditpol /set /category:"Policy Change" /success:enable /failure:enable | Out-Null
-auditpol /set /category:"Privilege Use" /success:enable /failure:enable | Out-Null
-auditpol /set /category:"System" /success:enable /failure:enable | Out-Null
-auditpol /set /category:"Detailed Tracking" /success:enable /failure:enable | [cite_start]Out-Null
-
-# Increase Event Log Size (Security Log to 512MB) 
-Write-Step "Increasing Security Log retention to 512MB"
+Write-Step "Increasing Security Log to 512MB"
 wevtutil sl Security /rt:true /ms:512000
 
-# Enable PowerShell ScriptBlock Logging 
-Write-Step "Enabling PowerShell ScriptBlock Logging"
-$PSPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
-if (!(Test-Path $PSPath)) { New-Item -Path $PSPath -Force | Out-Null }
-Set-ItemProperty -Path $PSPath -Name "EnableScriptBlockLogging" -Value 1 -Force
-
-# Enable Windows Defender Logging 
-Write-Step "Enabling Windows Defender Logging"
-Set-MpPreference -EnableLogging $true -ErrorAction SilentlyContinue
-[cite_start]Set-MpPreference -DisableTamperProtection $false -ErrorAction SilentlyContinue # 
-
 # ========================================================
-# PHASE 5: COMPLETION
+# PHASE 6: MAINTENANCE
 # ========================================================
-Write-Section "HARDENING COMPLETE"
-Write-Host "
-Action Required:
-1. REBOOT the server to finalize LSASS and SMBv1 changes.
-2. Verify 'scriptOut.txt' (from Protocol 2) for disabled users.
-3. Review Event Viewer > Security for new audit logs.
-" -ForegroundColor Yellow
+Write-Section "PHASE 6: Maintenance Configuration"
+
+Write-Step "Enabling Automatic Windows Updates"
+$wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+if (!(Test-Path $wuPath)) { New-Item -Path $wuPath -Force | Out-Null }
+Set-ItemProperty -Path $wuPath -Name "NoAutoUpdate" -Value 0 -Type DWORD -Force
+Set-ItemProperty -Path $wuPath -Name "AUOptions" -Value 4 -Type DWORD -Force # 4 = Auto download and schedule install
+
+Write-Section "HARDENING COMPLETE. PLEASE REBOOT."
