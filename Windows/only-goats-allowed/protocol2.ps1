@@ -1,160 +1,162 @@
-# Run as Domain Admin on a Domain Controller or machine with RSAT tools
-Import-Module ActiveDirectory -ErrorAction Stop
-
-# --- Configuration ---
-$allowedUsersFile = "allowed.txt"
-$OutputFile = "scriptOut.txt"
-
-# Accounts that should NEVER be touched (Regex patterns)
-# 'krbtgt' is the Key Distribution Center Service Account - do not touch.
-$ExcludePatterns = @('krbtgt', 'Guest', 'DefaultAccount', 'svc_', 'gmsa$') 
-
-# --- Setup & Checks ---
-if (-not (Test-Path $allowedUsersFile)) {
-    Write-Error "CRITICAL: allowed.txt not found. Create it with a list of authorized SAMAccountNames."
-    exit
+# Check for Admin Privileges
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "[-] Script must be run as Administrator."
+    break
 }
 
-$allowedUsers = Get-Content $allowedUsersFile
+# --- Helper Function for Output ---
+function Write-Section {
+    param([string]$Title)
+    Write-Host "`n========================================================" -ForegroundColor Cyan
+    Write-Host " [+] $Title" -ForegroundColor Cyan
+    Write-Host "========================================================" -ForegroundColor Cyan
+}
 
-# --- Functions ---
+function Write-Step {
+    param([string]$Message)
+    Write-Host "  > $Message" -ForegroundColor Green
+}
 
-# Function: Restrict access to Domain Admins only
-function Secure-OutputFile {
-    param($path)
-    try {
-        $acl = Get-Acl $path
-        $acl.SetAccessRuleProtection($true, $false) # Disable inheritance
-        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Domain Admins","FullControl","Allow")
-        $acl.SetAccessRule($rule)
-        Set-Acl $path $acl
-    } catch {
-        Write-Warning "Could not secure output file permissions. Ensure you are running as Admin."
+function Write-ErrorStep {
+    param([string]$Message)
+    Write-Host "  [!] ERROR: $Message" -ForegroundColor Red
+}
+
+# Import AD Module
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+} catch {
+    Write-Warning "Active Directory module not found. Some domain-specific commands may fail."
+}
+
+# ========================================================
+# PHASE 1: ACCOUNT & PASSWORD POLICIES
+# ========================================================
+Write-Section "PHASE 1: Enforcing Domain Password & Lockout Policies"
+
+try {
+    Write-Step "Setting Domain Password Policy (Min Length: 14, History: 24, Age: 1 Day)"
+    [cite_start]
+    Set-ADDefaultDomainPasswordPolicy -Identity (Get-ADDomain).Name `
+        -MinPasswordLength 14 `
+        -PasswordHistoryCount 24 `
+        -MinPasswordAge "1.00:00:00" `
+        -MaxPasswordAge "30.00:00:00" `
+        -ComplexityEnabled $true `
+        -ReversibleEncryptionEnabled $false -ErrorAction Stop
+
+    Write-Step "Setting Account Lockout Policy (Threshold: 5, Duration: 15m)"
+    [cite_start]
+    Set-ADDefaultDomainPasswordPolicy -Identity (Get-ADDomain).Name `
+        -LockoutDuration "00:15:00" `
+        -LockoutObservationWindow "00:30:00" `
+        -LockoutThreshold 5 -ErrorAction Stop
+} catch {
+    Write-ErrorStep "Failed to apply AD Password Policy. (Are you on the DC?)"
+}
+
+# ========================================================
+# PHASE 2: REGISTRY HARDENING (AD SPECIFIC)
+# ========================================================
+Write-Section "PHASE 2: Registry Hardening (SMB, LDAP, LSASS)"
+
+# 1. Disable LM Hash Storage 
+Write-Step "Disabling LAN Manager (LM) Hash storage"
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "NoLMHash" -Value 1 -Force
+
+# 2. Enforce SMB Signing 
+Write-Step "Enforcing SMB Signing (Digitally sign communications)"
+Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\LanmanServer\Parameters" -Name "RequireSecuritySignature" -Value 1 -Force
+Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\LanmanServer\Parameters" -Name "EnableSecuritySignature" -Value 1 -Force
+
+# 3. LDAP Signing Requirements 
+Write-Step "Enforcing LDAP Server Signing"
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters" -Name "LDAPServerIntegrity" -Value 2 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+
+# 4. Disable SMBv1 (EternalBlue Mitigation)
+Write-Step "Disabling SMBv1 Protocol (EternalBlue Mitigation)"
+Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction SilentlyContinue
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "SMB1" -Value 0 -Type DWORD -Force
+
+# 5. LSASS Protection (RunAsPPL) 
+Write-Step "Enabling LSASS Protection (RunAsPPL) to block Mimikatz"
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RunAsPPL" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+
+# 6. Disable NetBIOS over TCP/IP 
+Write-Step "Disabling NetBIOS over TCP/IP"
+Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" | ForEach-Object {
+    $_.SetTcpipNetbios(2) | Out-Null
+}
+
+# ========================================================
+# PHASE 3: SERVICE MANAGEMENT 
+# ========================================================
+Write-Section "PHASE 3: Disabling Vulnerable/Unnecessary Services"
+
+$servicesToDisable = @(
+    [cite_start]"RemoteRegistry",      
+    [cite_start]"Spooler",             # Print Spooler (PrintNightmare) 
+    [cite_start]"TlntSvr",             # Telnet 
+    [cite_start]"MSFtpsvc",            # FTP 
+    [cite_start]"SNMP",                # SNMP 
+    [cite_start]"bthserv",             # Bluetooth Support 
+    "MapsBroker",          # Downloaded Maps Manager
+    [cite_start]"upnphost",            # UPnP Device Host 
+    [cite_start]"SSDPSRV",             # SSDP Discovery 
+    "Mcx2Svc"              # Media Center Extender
+)
+
+foreach ($service in $servicesToDisable) {
+    if (Get-Service -Name $service -ErrorAction SilentlyContinue) {
+        Write-Step "Disabling Service: $service"
+        Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+        Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
     }
 }
 
-# Function: Generate 15-char complex password
-function New-RandomPassword {
-    param([int]$Length = 15)
-    $lower = 'abcdefghijklmnopqrstuvwxyz'
-    $upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-    $digits = '0123456789'
-    $symbols = '!@#$%^&*()-_=+[]{}<>?'
-    
-    $all = ($lower + $upper + $digits + $symbols).ToCharArray()
-    $pwChars = @()
-    
-    # Ensure at least one of each class is present
-    $pwChars += ($lower.ToCharArray() | Get-Random -Count 1)
-    $pwChars += ($upper.ToCharArray() | Get-Random -Count 1)
-    $pwChars += ($digits.ToCharArray() | Get-Random -Count 1)
-    $pwChars += ($symbols.ToCharArray() | Get-Random -Count 1)
-    
-    # Fill the remaining length
-    $remaining = $Length - $pwChars.Count
-    for ($i = 0; $i -lt $remaining; $i++) {
-        $pwChars += $all | Get-Random -Count 1
-    }
-    
-    # Shuffle the result
-    return -join ($pwChars | Get-Random -Count $pwChars.Count)
-}
+# ========================================================
+# PHASE 4: ADVANCED AUDITING & LOGGING
+# ========================================================
+Write-Section "PHASE 4: Configuring Advanced Audit Policies"
 
-# --- Execution ---
+# Enabling specific audit categories mentioned in the checklist
+$auditCategories = @(
+    "Logon/Logoff", "Account Logon", "Account Management", "DS Access", 
+    "Object Access", "Policy Change", "Privilege Use", "System", "Detailed Tracking"
+)
 
-# Initialize Output File
-"DOMAIN USER CONFIGURATION AUDIT" | Out-File -FilePath $OutputFile -Encoding UTF8 -Force
-"Generated on: $(Get-Date)" | Out-File -FilePath $OutputFile -Append
-"--------------------------------" | Out-File -FilePath $OutputFile -Append
+# Note: 'auditpol' requires standard category names.
+Write-Step "Enabling Success/Failure Auditing for critical subsystems"
+auditpol /set /category:"Account Logon" /success:enable /failure:enable | Out-Null
+auditpol /set /category:"Account Management" /success:enable /failure:enable | Out-Null
+auditpol /set /category:"Logon/Logoff" /success:enable /failure:enable | Out-Null
+auditpol /set /category:"Policy Change" /success:enable /failure:enable | Out-Null
+auditpol /set /category:"Privilege Use" /success:enable /failure:enable | Out-Null
+auditpol /set /category:"System" /success:enable /failure:enable | Out-Null
+auditpol /set /category:"Detailed Tracking" /success:enable /failure:enable | [cite_start]Out-Null
 
-$allUsers = Get-ADUser -Filter * -Properties MemberOf, Enabled, SamAccountName
+# Increase Event Log Size (Security Log to 512MB) 
+Write-Step "Increasing Security Log retention to 512MB"
+wevtutil sl Security /rt:true /ms:512000
 
-# List to track who is allowed and needs processing in Phase 2 & 3
-$activeUsers = @()
+# Enable PowerShell ScriptBlock Logging 
+Write-Step "Enabling PowerShell ScriptBlock Logging"
+$PSPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+if (!(Test-Path $PSPath)) { New-Item -Path $PSPath -Force | Out-Null }
+Set-ItemProperty -Path $PSPath -Name "EnableScriptBlockLogging" -Value 1 -Force
 
-# === Phase 1: Wrong Users ===
-"`nPhase 1: Wrong Users (Disabled)" | Out-File -FilePath $OutputFile -Append
-"-----------------------" | Out-File -FilePath $OutputFile -Append
-$formatString = "{0,-20} {1,-10}"
-$formatString -f "Username", "Action" | Out-File -FilePath $OutputFile -Append
-$formatString -f "--------", "------" | Out-File -FilePath $OutputFile -Append
+# Enable Windows Defender Logging 
+Write-Step "Enabling Windows Defender Logging"
+Set-MpPreference -EnableLogging $true -ErrorAction SilentlyContinue
+[cite_start]Set-MpPreference -DisableTamperProtection $false -ErrorAction SilentlyContinue # 
 
-foreach ($user in $allUsers) {
-    $sam = $user.SamAccountName
-    
-    # Check Exclusions
-    $isExcluded = $false
-    foreach ($pat in $ExcludePatterns) { if ($sam -match $pat) { $isExcluded = $true; break } }
-    
-    if ($isExcluded) {
-        continue # Skip system accounts entirely
-    }
-
-    if ($allowedUsers -contains $sam) {
-        # User is allowed: Add to active list for later processing
-        $activeUsers += $user
-    } else {
-        # User is NOT allowed: Disable
-        try {
-            Disable-ADAccount -Identity $user.DistinguishedName -ErrorAction Stop
-            $formatString -f $sam, "Disabled" | Out-File -FilePath $OutputFile -Append
-            Write-Host "DISABLED: $sam" -ForegroundColor Red
-        } catch {
-            $formatString -f $sam, "ERROR" | Out-File -FilePath $OutputFile -Append
-            Write-Host "ERROR Disabling $sam" -ForegroundColor Yellow
-        }
-    }
-}
-
-# === Phase 2: User Admin Status ===
-# Checks only the Allowed Users from Phase 1
-"`nPhase 2: User Admin Status" | Out-File -FilePath $OutputFile -Append
-"-----------------------" | Out-File -FilePath $OutputFile -Append
-$formatString -f "Username", "IsAdmin" | Out-File -FilePath $OutputFile -Append
-$formatString -f "--------", "-------" | Out-File -FilePath $OutputFile -Append
-
-foreach ($user in $activeUsers) {
-    $isAdmin = "No"
-    # Check "Domain Admins" and standard "Administrators"
-    $groups = Get-ADPrincipalGroupMembership -Identity $user.DistinguishedName -ErrorAction SilentlyContinue
-    if ($groups.Name -contains "Domain Admins" -or $groups.Name -contains "Administrators") {
-        $isAdmin = "Yes"
-    }
-    
-    $formatString -f $user.SamAccountName, $isAdmin | Out-File -FilePath $OutputFile -Append
-}
-
-# === Phase 3: User Passwords ===
-# Rotates passwords for all Allowed Users
-"`nPhase 3: User Passwords" | Out-File -FilePath $OutputFile -Append
-"-----------------------" | Out-File -FilePath $OutputFile -Append
-$passFormat = "{0,-20} {1,-25}"
-$passFormat -f "Username", "New Password" | Out-File -FilePath $OutputFile -Append
-$passFormat -f "--------", "------------" | Out-File -FilePath $OutputFile -Append
-
-foreach ($user in $activeUsers) {
-    try {
-        $plain = New-RandomPassword -Length 15
-        $secure = ConvertTo-SecureString $plain -AsPlainText -Force
-        
-        # 1. Reset Password
-        Set-ADAccountPassword -Identity $user.DistinguishedName -NewPassword $secure -Reset -ErrorAction Stop
-        
-        # 2. Unlock Account (if locked)
-        Unlock-ADAccount -Identity $user.DistinguishedName -ErrorAction SilentlyContinue
-        
-        # 3. Force change at next logon (Security best practice)
-        Set-ADUser -Identity $user.DistinguishedName -ChangePasswordAtLogon $true -ErrorAction Stop
-        
-        # Log credentials
-        $passFormat -f $user.SamAccountName, $plain | Out-File -FilePath $OutputFile -Append
-        Write-Host "ROTATED: $($user.SamAccountName)" -ForegroundColor Green
-    } catch {
-        $passFormat -f $user.SamAccountName, "ERROR: $($_.Exception.Message)" | Out-File -FilePath $OutputFile -Append
-        Write-Host "FAILED ROTATION: $($user.SamAccountName)" -ForegroundColor Red
-    }
-}
-
-# Secure the output file
-Secure-OutputFile -path $OutputFile
-Write-Host "`nDONE. Results saved to $OutputFile" -ForegroundColor Cyan
+# ========================================================
+# PHASE 5: COMPLETION
+# ========================================================
+Write-Section "HARDENING COMPLETE"
+Write-Host "
+Action Required:
+1. REBOOT the server to finalize LSASS and SMBv1 changes.
+2. Verify 'scriptOut.txt' (from Protocol 2) for disabled users.
+3. Review Event Viewer > Security for new audit logs.
+" -ForegroundColor Yellow
