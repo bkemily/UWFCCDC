@@ -83,15 +83,11 @@ rm -f /home/*/.bashrc
 echo -e "\033[34m[i] Temporarily removed SSH Keys while initial verification takes place \033[0m"
 
 # Reset password for every user in /etc/passwd
-# Each user gets a unique random 4-character suffix
-# Format: username:username-XXXX
-cut -d: -f1 /etc/passwd | while read u; do
-    p=$(tr -dc A-Za-z0-9 </dev/urandom | head -c4)
-    echo $u:$u-$p | chpasswd
-    echo $u:$u-$p
-done
+# Each user gets a unique random 8-character suffix
+# Every password will be output to REMOVEME.txt and to the terminal
+# Format: username:username-XXXXXXXX
 
-echo -e "\033[34m[i] Set Password\033[0m"
+./password.sh
 
 # Increase inotify watch limit (prevents file-watch exhaustion issues)
 sysctl fs.inotify.max_user_watches=524288
@@ -170,6 +166,7 @@ echo -e "\033[34m[i] Setting Audit Rules\033[0m"
 
 # Audit all execve system calls
 # Logs both root and non-root command execution (32-bit and 64-bit)
+# Logs go to /var/log/audit/audit.log
 auditctl -a exit,always -F arch=b64 -F euid=0   -S execve -k audit-wazuh-c
 auditctl -a exit,always -F arch=b32 -F euid=0   -S execve -k audit-wazuh-c
 auditctl -a exit,always -F arch=b64 -F euid!=0  -S execve -k audit-wazuh-c
