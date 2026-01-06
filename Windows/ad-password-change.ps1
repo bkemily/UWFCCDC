@@ -22,31 +22,33 @@ function Secure-OutputFile {
 
 # Password generator: ensures 15+ chars, and at least 1 upper, lower, digit, symbol
 function New-RandomPassword {
-    param([int]$Length = 15)
+    param([int]$Length = 4)
 
-    if ($Length -lt 15) { $Length = 15 }
+    $wordlist = Get-Content "words.txt"
+    $symbols = "!@#$%^&*()-_=+[]{}<>?"
 
-    $lower = 'abcdefghijklmnopqrstuvwxyz'
-    $upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-    $digits = '0123456789'
-    $symbols = '!@#$%^&*()-_=+[]{}<>?'
+    if ($wordlist.Length -lt 500) {
+        throw "Could not find a long enough wordlist"
+    } 
+    $joinChar = '-'
 
-    $all = ($lower + $upper + $digits + $symbols).ToCharArray()
-
-    # Ensure each class present
-    $pwChars = @()
-    $pwChars += ($lower.ToCharArray() | Get-Random -Count 1)
-    $pwChars += ($upper.ToCharArray() | Get-Random -Count 1)
-    $pwChars += ($digits.ToCharArray() | Get-Random -Count 1)
-    $pwChars += ($symbols.ToCharArray() | Get-Random -Count 1)
-
-    $remaining = $Length - $pwChars.Count
-    for ($i = 1; $i -le $remaining; $i++) {
-        $pwChars += $all | Get-Random -Count 1
+    $chosenWords = $wordlist | Get-Random -Count 5 #Pick 5 random words
+    $passwordWords = @()
+    ForEach ($word in $chosenWords) {
+        if ($(Get-Random -Maximum 2) -eq 1)
+         { 
+            $passwordWords += $word.toUpper() #Random chance to capitalize
+        } else {
+            $passwordWords += $word
+        }
     }
 
-    # Shuffle
-    -join ($pwChars | Get-Random -Count $pwChars.Count)
+    $passwordString = $passwordWords -join $joinChar
+    $randomNum = (Get-Random -Minimum 0 -Maximum 999).ToString('000') 
+    $randomSymbol = $symbols.ToCharArray() | Get-Random -Count 1
+    $passwordString += $randomSymbol
+    $passwordString += $randomNum #Add random 000 to 999
+    $passwordString
 }
 
 # Optional: list of SamAccountName patterns to skip (service accounts, gMSA, etc.)
