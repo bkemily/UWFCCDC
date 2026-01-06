@@ -40,25 +40,63 @@ echo -e "
 *+#=%%##*###*++****################%%@@@%#*#####%#####%%%%%%%%%%%%%%%###*###***##########**=+=:.:.:.
 "
 
+set -euo pipefail
+
+BACKUP="/.x84"
+
 
 # Print script name/status messages in blue
 echo -e "\033[34m[i] Arthur Mitchell on Security\033[0m"
 echo -e "\033[34m[i] Running...\033[0m"
 
-echo "[i] Restoring directories from /.x84"
+echo "[i] Restoring directories from $BACKUP"
 
-# Safety check
-if [ ! -d "/.x84" ]; then
-    echo "[!] /.x84 does not exist — aborting"
+# Sanity checks
+if [[ $EUID -ne 0 ]]; then
+    echo "[!] Must be run as root"
     exit 1
 fi
 
-# Restore directories
-cp -rp /.x84/etc  /
-cp -rp /.x84/home /
-cp -rp /.x84/opt  /
-cp -rp /.x84/root /
-cp -rp /.x84/var  /
+if [[ ! -d "$BACKUP" ]]; then
+    echo "[!] Backup directory $BACKUP does not exist"
+    exit 1
+fi
 
-echo -e "\033[34m[i] Passwords have been reverted to initial state\033[0m"
-echo "\033[34m[i] Restore completed\033[0m"
+echo "[i] Removing immutable flags where required"
+
+# Remove immutability ONLY where restore is needed
+chattr -R -i /var/www 2>/dev/null || true
+chattr -i "$BACKUP" 2>/dev/null || true
+
+# If PAM security dir was locked, unlock temporarily
+if [[ -d /lib/x86_64-linux-gnu/security ]]; then
+    chattr -i /lib/x86_64-linux-gnu/security 2>/dev/null || true
+fi
+
+echo "[i] Restoring directories with permissions, ACLs, xattrs preserved"
+
+# Use rsync for correctness (cp is NOT sufficient here)
+rsync -aAXH --numeric-ids --delete "$BACKUP/etc/"  /etc/
+rsync -aAXH --numeric-ids --delete "$BACKUP/home/" /home/
+rsync -aAXH --numeric-ids --delete "$BACKUP/opt/"  /opt/
+rsync -aAXH --numeric-ids --delete "$BACKUP/root/" /root/
+
+# Restore only /var/www, not all of /var
+if [[ -d "$BACKUP/var/www" ]]; then
+    rsync -aAXH --numeric-ids --delete "$BACKUP/var/www/" /var/www/
+fi
+
+echo "[i] Restore completed successfully"
+
+echo "[i] Re-applying immutable flags for protection"
+
+# Re-lock directories that your script locked
+chattr +i "$BACKUP" 2>/dev/null || true
+chattr -R +i /var/www 2>/dev/null || true
+
+if [[ -d /lib/x86_64-linux-gnu/security ]]; then
+    chattr +i /lib/x86_64-linux-gnu/security 2>/dev/null || true
+fi
+
+echo -e "\033[34m[i] Passwords have been reverted to state after setup script\033[0m"
+echo -e "\033[34m[i] Restore completed\033[0m"

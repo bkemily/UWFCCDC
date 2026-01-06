@@ -86,8 +86,8 @@ echo -e "\033[34m[i] Temporarily removed SSH Keys while initial verification tak
 # Each user gets a unique random 8-character suffix
 # Every password will be output to REMOVEME.txt and to the terminal
 # Format: username:username-XXXXXXXX
-
-./password.sh
+# Removed for security
+#./password.sh
 
 # Increase inotify watch limit (prevents file-watch exhaustion issues)
 sysctl fs.inotify.max_user_watches=524288
@@ -167,10 +167,10 @@ echo -e "\033[34m[i] Setting Audit Rules\033[0m"
 # Audit all execve system calls
 # Logs both root and non-root command execution (32-bit and 64-bit)
 # Logs go to /var/log/audit/audit.log
-auditctl -a exit,always -F arch=b64 -F euid=0   -S execve -k audit-wazuh-c
-auditctl -a exit,always -F arch=b32 -F euid=0   -S execve -k audit-wazuh-c
-auditctl -a exit,always -F arch=b64 -F euid!=0  -S execve -k audit-wazuh-c
-auditctl -a exit,always -F arch=b32 -F euid!=0  -S execve -k audit-wazuh-c
+# auditctl -a exit,always -F arch=b64 -F euid=0   -S execve -k audit-wazuh-c
+# auditctl -a exit,always -F arch=b32 -F euid=0   -S execve -k audit-wazuh-c
+# auditctl -a exit,always -F arch=b64 -F euid!=0  -S execve -k audit-wazuh-c
+# auditctl -a exit,always -F arch=b32 -F euid!=0  -S execve -k audit-wazuh-c
 
 echo -e "\033[34m[i] Setting Permissions\033[0m"
 
